@@ -26,6 +26,16 @@ fi
 adb() { "$ADB" -s "$serial" "$@"; }
 echo "device: $(adb shell getprop ro.product.model | tr -d '\r') ($serial)"
 
+# The CUDA USB Server app (server-app/) runs the same server; if it is serving, only forward.
+if adb shell "netstat -ltn" | grep -q "127.0.0.1:$PORT .*LISTEN" &&
+   ! adb shell "ps" | grep -q "$REMOTE"; then
+    adb forward "tcp:$PORT" "tcp:$PORT" >/dev/null
+    echo "the CUDA USB Server app is serving, forwarded to 127.0.0.1:$PORT"
+    echo
+    echo "Use it with:  source $ROOT/scripts/env.sh"
+    exit 0
+fi
+
 adb push "$SERVER" "$REMOTE" >/dev/null 2>&1 || { echo "cannot push the server to the tablet"; exit 1; }
 adb shell chmod 755 "$REMOTE"
 adb shell "pkill -f $REMOTE" >/dev/null 2>&1 || true

@@ -18,7 +18,7 @@ KT_CUBIN := python/k1torch/kernels.cubin
 
 all: $(SERVER) $(SHIM) $(BUILD)/lib/libcuda.so $(EXAMPLES) $(KT_CUBIN)
 
-$(SERVER): server/server.c common/protocol.h
+$(SERVER): server/server.c server/server.h common/protocol.h
 	@mkdir -p $(@D)
 	$(NDK_CC) $(CFLAGS) -I$(CUDA_HOME)/include $< -o $@ -ldl
 

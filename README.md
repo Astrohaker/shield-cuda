@@ -18,6 +18,7 @@ tablet: cudausb-server (adb shell) ──> /vendor/lib/libcuda.so ──> Tegra 
 | `python/k1torch/` | PyTorch-like framework for training CNNs on the tablet GPU |
 | `examples/`, `python/examples/` | C and Python examples |
 | `android-app/` | NSTcuda: Android app that runs a CUDA kernel on the tablet itself (managed memory) |
+| `server-app/` | CUDA USB Server: the same server as an Android app with START/STOP and live GPU monitoring |
 | `toolchain/` | **not in git** - CUDA 7.5 compiler, NDK subset, adb; comes with the release archive |
 
 After `git clone`, get `toolchain/` from the `cuda-usb-offline.tar.gz` release asset (it contains
@@ -71,6 +72,22 @@ cuda-usb/scripts/install.sh --bashrc  # also adds env.sh to ~/.bashrc
 ```
 
 The folder is relocatable: all paths are relative to it.
+
+## GUI server on the tablet (server-app)
+
+Instead of the console `cudausb-server`, the server can run inside the **CUDA USB Server** app:
+START/STOP buttons, segmented gauges and 60-second charts of GPU load and clock (gk20a sysfs),
+USB traffic, CUDA calls and kernel launches per second, CPU and memory, plus server counters and
+a log. It compiles `server/server.c` with `-DCUDAUSB_LIBRARY` and keeps running in a foreground
+service with a wake lock when the screen is off.
+
+```bash
+cd server-app && ./gradlew installDebug   # build + install (uses ../toolchain/cuda for cuda.h)
+scripts/disconnect.sh                     # the console server and the app share port 7777
+```
+
+Press START in the app, then `scripts/connect.sh` on the PC: it sees the app serving and only
+sets up `adb forward`. Temperatures other than the battery's are closed to apps by SELinux.
 
 ## Usage
 

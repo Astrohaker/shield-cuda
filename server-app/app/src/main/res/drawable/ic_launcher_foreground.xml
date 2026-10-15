@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Green GPU chip with load bars -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp" android:height="108dp"
+    android:viewportWidth="108" android:viewportHeight="108">
+    <path android:fillColor="#FF76B900"
+        android:pathData="M40,36h28a4,4 0,0 1,4 4v28a4,4 0,0 1,-4 4h-28a4,4 0,0 1,-4 -4v-28a4,4 0,0 1,4 -4zM44,44v20h20v-20zM42,28h4v6h-4zM52,28h4v6h-4zM62,28h4v6h-4zM42,74h4v6h-4zM52,74h4v6h-4zM62,74h4v6h-4zM28,42h6v4h-6zM28,52h6v4h-6zM28,62h6v4h-6zM74,42h6v4h-6zM74,52h6v4h-6zM74,62h6v4h-6z" />
+    <path android:fillColor="#FFA6F000" android:pathData="M48,58h3v4h-3zM52.5,53h3v9h-3zM57,48h3v14h-3z" />
+</vector>

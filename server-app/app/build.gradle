@@ -1,0 +1,72 @@
+plugins {
+    id 'com.android.application'
+}
+
+// GUI for cudausb-server: runs ../server/server.c inside the app with live GPU monitoring.
+// cuda.h comes from the repository's toolchain/cuda, else ~/cuda-7.5; override with CUDA_HOME.
+def repoCuda = rootProject.file('../toolchain/cuda')
+def cudaHome = findProperty('CUDA_HOME') ?:
+        (repoCuda.exists() ? repoCuda.absolutePath : "${System.getProperty('user.home')}/cuda-7.5")
+
+// Release signing reuses the shared astrohacker keystore (CUDAUSB_*, falling back to DESCENT2_*).
+def releaseStoreFile = findProperty('CUDAUSB_STORE_FILE') ?: findProperty('DESCENT2_STORE_FILE')
+def releaseStorePassword = findProperty('CUDAUSB_STORE_PASSWORD') ?: findProperty('DESCENT2_STORE_PASSWORD')
+
+android {
+    namespace 'com.astrohacker.cudausb'
+    compileSdk 36
+
+    defaultConfig {
+        applicationId 'com.astrohacker.cudausb'
+        minSdk 23
+        targetSdk 36
+        versionCode 1
+        versionName '1.0'
+
+        // CUDA on Android exists only for 32-bit Tegra K1 (SHIELD Tablet).
+        ndk {
+            abiFilters 'armeabi-v7a'
+        }
+        externalNativeBuild {
+            cmake {
+                arguments "-DCUDA_HOME=${cudaHome}"
+            }
+        }
+    }
+
+    ndkVersion '21.4.7075529'
+
+    externalNativeBuild {
+        cmake {
+            path 'src/main/cpp/CMakeLists.txt'
+            version '3.18.1'
+        }
+    }
+
+    signingConfigs {
+        release {
+            if (releaseStoreFile) {
+                storeFile file(releaseStoreFile)
+                storePassword releaseStorePassword
+                keyAlias findProperty('CUDAUSB_KEY_ALIAS')
+                keyPassword findProperty('CUDAUSB_KEY_PASSWORD')
+            }
+        }
+    }
+
+    buildTypes {
+        release {
+            minifyEnabled true
+            shrinkResources true
+            proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
+            if (releaseStoreFile) {
+                signingConfig signingConfigs.release
+            }
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+}

@@ -1,0 +1,21 @@
+<resources>
+    <string name="app_name">CUDA USB Server</string>
+    <string name="title">CUDA USB SERVER</string>
+    <string name="start">▶  СТАРТ</string>
+    <string name="stop">■  СТОП</string>
+    <string name="stopping">ОСТАНОВКА…</string>
+    <string name="status_running">РАБОТАЕТ</string>
+    <string name="status_stopped">ОСТАНОВЛЕН</string>
+    <string name="status_client">КЛИЕНТ ПОДКЛЮЧЁН</string>
+    <string name="uptime">аптайм %1$s</string>
+    <string name="address">127.0.0.1:%1$d   ·   на ПК: adb forward tcp:%1$d tcp:%1$d</string>
+    <string name="no_cuda">CUDA-драйвер не найден: нужен NVIDIA SHIELD Tablet (Tegra K1)</string>
+    <string name="device_info">%1$s  ·  sm_%2$d%3$d  ·  %4$d SM  ·  %5$d МГц  ·  %6$d МБ  ·  драйвер CUDA %7$d.%8$d</string>
+    <string name="port_busy">Порт %1$d занят: вероятно, работает консольный cudausb-server. Остановите его: scripts/disconnect.sh</string>
+    <string name="start_failed">Не удалось запустить сервер: ошибка %1$d</string>
+    <string name="section_stats">СЕРВЕР</string>
+    <string name="section_log">ЖУРНАЛ</string>
+    <string name="notification_channel">Сервер CUDA</string>
+    <string name="notification_title">CUDA USB Server работает</string>
+    <string name="notification_text">127.0.0.1:%1$d, GPU планшета доступен ПК по USB</string>
+</resources>

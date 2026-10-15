@@ -2,23 +2,30 @@
 // received from the host shim through the device's own libcuda.so.
 // Usage: cudausb-server [-d] [port]   (listens on 127.0.0.1, reached via `adb forward`)
 //   -d  detach from the adb shell session, so the server outlives it
+// Built with -DCUDAUSB_LIBRARY it has no main() and exposes the API of server.h instead
+// (used by the server-app GUI).
 #include <arpa/inet.h>
 #include <fcntl.h>
 #include <cuda.h>
 #include <dlfcn.h>
+#include <errno.h>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
+#include <pthread.h>
 #include <signal.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/socket.h>
+#include <time.h>
 #include <unistd.h>
 
 #include "../common/protocol.h"
+#include "server.h"
 
 #define MAX_TRACKED 256
+#define MAX_ALLOCS 4096
 
 static struct {
     CUresult (*init)(unsigned);
@@ -59,16 +66,63 @@ static int contextCount;
 // The request being handled is fire-and-forget: reply() records errors instead of sending.
 static int asyncRequest;
 static CUresult deferredError;
+static uint32_t currentOp;
+
+// Allocations of the current client, for the "client memory" statistic.
+static struct {
+    uint32_t ptr, size;
+} allocs[MAX_ALLOCS];
+static int allocCount;
+
+static ServerStats stats;  // updated with __atomic builtins, read from other threads
+#define STAT_ADD(field, v) __atomic_fetch_add(&stats.field, (v), __ATOMIC_RELAXED)
+#define STAT_SET(field, v) __atomic_store_n(&stats.field, (v), __ATOMIC_RELAXED)
+
+static volatile int stopping;
+static int listenFd = -1;
+static volatile int clientFd = -1;
+
+#ifdef CUDAUSB_LIBRARY
+static void (*logSink)(const char* line);
+void cudausb_set_log_sink(void (*sink)(const char* line)) { logSink = sink; }
+#endif
 
 static void logf_(const char* fmt, ...) {
     va_list ap;
     va_start(ap, fmt);
+#ifdef CUDAUSB_LIBRARY
+    char line[512];
+    vsnprintf(line, sizeof line, fmt, ap);
+    if (logSink) logSink(line);
+#else
     vfprintf(stderr, fmt, ap);
-    va_end(ap);
     fputc('\n', stderr);
+#endif
+    va_end(ap);
+}
+
+static const char* opName(uint32_t op) {
+    static const char* names[] = {
+        "?", "Hello", "cuInit", "cuDriverGetVersion", "cuDeviceGetCount", "cuDeviceGet",
+        "cuDeviceGetName", "cuDeviceGetAttribute", "cuDeviceTotalMem", "cuCtxCreate",
+        "cuCtxDestroy", "cuCtxSynchronize", "cuMemGetInfo", "cuMemAlloc", "cuMemFree",
+        "cuMemcpyHtoD", "cuMemcpyDtoH", "cuMemcpyDtoD", "cuMemsetD8", "cuMemsetD32",
+        "cuModuleLoadData", "cuModuleUnload", "cuModuleGetFunction", "cuLaunchKernel",
+        "cuEventCreate", "cuEventRecord", "cuEventSynchronize", "cuEventElapsedTime",
+        "cuEventDestroy",
+    };
+    return op < sizeof names / sizeof *names ? names[op] : "?";
+}
+
+static uint64_t nowNs(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (uint64_t) ts.tv_sec * 1000000000u + ts.tv_nsec;
 }
 
 static int loadDriver(void) {
+    static int loaded;
+    if (loaded) return 1;
     void* lib = dlopen("libcuda.so", RTLD_NOW);
     if (!lib) {
         logf_("dlopen libcuda.so: %s", dlerror());
@@ -107,7 +161,7 @@ static int loadDriver(void) {
     LOAD(eventElapsedTime, "cuEventElapsedTime")
     LOAD(eventDestroy, "cuEventDestroy_v2")
 #undef LOAD
-    return 1;
+    return loaded = 1;
 }
 
 static int readAll(int fd, void* buf, size_t n) {
@@ -117,6 +171,7 @@ static int readAll(int fd, void* buf, size_t n) {
         if (r <= 0) return 0;
         p += r;
         n -= r;
+        STAT_ADD(bytesIn, r);
     }
     return 1;
 }
@@ -128,11 +183,16 @@ static int writeAll(int fd, const void* buf, size_t n) {
         if (r <= 0) return 0;
         p += r;
         n -= r;
+        STAT_ADD(bytesOut, r);
     }
     return 1;
 }
 
 static int reply(int fd, CUresult result, const void* payload, uint32_t len) {
+    if (result != CUDA_SUCCESS) {
+        STAT_ADD(errors, 1);
+        logf_("%s failed: CUresult %d", opName(currentOp), result);
+    }
     if (asyncRequest) {
         if (result != CUDA_SUCCESS && deferredError == CUDA_SUCCESS) deferredError = result;
         return 1;
@@ -148,12 +208,29 @@ static int replyU32(int fd, CUresult result, uint32_t value) {
 
 static void trackContext(CUcontext ctx) {
     if (contextCount < MAX_TRACKED) contexts[contextCount++] = ctx;
+    STAT_SET(contexts, contextCount);
 }
 
 static void untrackContext(CUcontext ctx) {
     for (int i = 0; i < contextCount; i++) {
         if (contexts[i] == ctx) {
             contexts[i] = contexts[--contextCount];
+            break;
+        }
+    }
+    STAT_SET(contexts, contextCount);
+}
+
+static void trackAlloc(uint32_t ptr, uint32_t size) {
+    STAT_ADD(clientMem, size);
+    if (allocCount < MAX_ALLOCS) allocs[allocCount++].ptr = ptr, allocs[allocCount - 1].size = size;
+}
+
+static void untrackAlloc(uint32_t ptr) {
+    for (int i = 0; i < allocCount; i++) {
+        if (allocs[i].ptr == ptr) {
+            __atomic_fetch_sub(&stats.clientMem, allocs[i].size, __ATOMIC_RELAXED);
+            allocs[i] = allocs[--allocCount];
             return;
         }
     }
@@ -233,11 +310,14 @@ static int handle(int fd, uint32_t op, uint8_t* in, uint32_t len) {
         NEED(4);
         CUdeviceptr p = 0;
         r = cu.memAlloc(&p, a[0]);
+        if (r == CUDA_SUCCESS) trackAlloc((uint32_t) p, a[0]);
         return replyU32(fd, r, (uint32_t) p);
     }
     case OP_MEM_FREE:
         NEED(4);
-        return reply(fd, cu.memFree(a[0]), NULL, 0);
+        r = cu.memFree(a[0]);
+        if (r == CUDA_SUCCESS) untrackAlloc(a[0]);
+        return reply(fd, r, NULL, 0);
     case OP_MEMCPY_HTOD:
         NEED(4);
         return reply(fd, cu.memcpyHtoD(a[0], in + 4, len - 4), NULL, 0);
@@ -262,11 +342,14 @@ static int handle(int fd, uint32_t op, uint8_t* in, uint32_t len) {
     case OP_MODULE_LOAD: {
         CUmodule m = NULL;
         r = cu.moduleLoadData(&m, in);
+        if (r == CUDA_SUCCESS) STAT_ADD(modules, 1);
         return replyU32(fd, r, (uint32_t) (uintptr_t) m);
     }
     case OP_MODULE_UNLOAD:
         NEED(4);
-        return reply(fd, cu.moduleUnload((CUmodule) (uintptr_t) a[0]), NULL, 0);
+        r = cu.moduleUnload((CUmodule) (uintptr_t) a[0]);
+        if (r == CUDA_SUCCESS) __atomic_fetch_sub(&stats.modules, 1, __ATOMIC_RELAXED);
+        return reply(fd, r, NULL, 0);
     case OP_MODULE_GET_FUNCTION: {
         NEED(5);
         in[len - 1] = 0;
@@ -291,6 +374,7 @@ static int handle(int fd, uint32_t op, uint8_t* in, uint32_t len) {
         r = cu.launchKernel((CUfunction) (uintptr_t) req->function, req->grid[0], req->grid[1],
                             req->grid[2], req->block[0], req->block[1], req->block[2],
                             req->sharedMemBytes, NULL, args, NULL);
+        STAT_ADD(launches, 1);
         return reply(fd, r, NULL, 0);
     }
     case OP_EVENT_CREATE: {
@@ -338,16 +422,144 @@ static void serveClient(int fd) {
         }
         if (!readAll(fd, buf, h.len)) break;
         asyncRequest = (h.op & OP_ASYNC) != 0;
-        if (!handle(fd, h.op & ~OP_ASYNC, buf, h.len)) break;
+        currentOp = h.op & ~OP_ASYNC;
+        uint64_t t0 = nowNs();
+        int ok = handle(fd, currentOp, buf, h.len);
+        STAT_ADD(busyNs, nowNs() - t0);
+        STAT_ADD(requests, 1);
+        if (!ok) break;
     }
     free(buf);
 
     for (int i = 0; i < contextCount; i++) cu.ctxDestroy(contexts[i]);
     if (contextCount) logf_("released %d context(s) left by the client", contextCount);
     contextCount = 0;
+    allocCount = 0;
     deferredError = CUDA_SUCCESS;
+    STAT_SET(contexts, 0);
+    STAT_SET(clientMem, 0);
+    STAT_SET(modules, 0);
 }
 
+// Binds 127.0.0.1:port; returns 0 or -errno.
+static int listenOn(int port) {
+    int srv = socket(AF_INET, SOCK_STREAM, 0);
+    if (srv < 0) return -errno;
+    int one = 1;
+    setsockopt(srv, SOL_SOCKET, SO_REUSEADDR, &one, sizeof one);
+    struct sockaddr_in addr = {0};
+    addr.sin_family = AF_INET;
+    addr.sin_port = htons(port);
+    addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    if (bind(srv, (struct sockaddr*) &addr, sizeof addr) || listen(srv, 4)) {
+        int err = errno;
+        close(srv);
+        return -err;
+    }
+    stopping = 0;
+    listenFd = srv;
+    STAT_SET(port, port);
+    logf_("cudausb-server listening on 127.0.0.1:%d", port);
+    return 0;
+}
+
+// Serves clients one at a time until stopServer().
+static void acceptLoop(void) {
+    int one = 1;
+    while (!stopping) {
+        int fd = accept(listenFd, NULL, NULL);
+        if (fd < 0) continue;
+        setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof one);
+        clientFd = fd;
+        if (stopping) shutdown(fd, SHUT_RDWR);  // stopServer() ran before clientFd was set
+        logf_("client connected");
+        STAT_ADD(sessions, 1);
+        STAT_SET(clientConnected, 1);
+        serveClient(fd);
+        STAT_SET(clientConnected, 0);
+        clientFd = -1;
+        close(fd);
+        logf_("client disconnected");
+    }
+    close(listenFd);
+    listenFd = -1;
+    logf_("cudausb-server stopped");
+}
+
+#ifdef CUDAUSB_LIBRARY
+
+// Wakes acceptLoop() (blocked in accept or in the client's read) and makes it return.
+static void stopServer(void) {
+    stopping = 1;
+    if (listenFd >= 0) shutdown(listenFd, SHUT_RDWR);
+    int fd = clientFd;
+    if (fd >= 0) shutdown(fd, SHUT_RDWR);
+}
+
+static pthread_t serverThread;
+static int serverRunning;
+
+static void* serverMain(void* unused) {
+    acceptLoop();
+    __atomic_store_n(&stats.running, 0, __ATOMIC_RELAXED);
+    return NULL;
+}
+
+int cudausb_device_info(DeviceInfo* info) {
+    memset(info, 0, sizeof *info);
+    CUdevice dev;
+    if (!loadDriver() || cu.init(0) || cu.deviceGet(&dev, 0)) return 0;
+    size_t total = 0;
+    cu.driverGetVersion(&info->driverVersion);
+    cu.deviceGetName(info->name, sizeof info->name, dev);
+    cu.deviceTotalMem(&total, dev);
+    info->totalMem = total;
+    cu.deviceGetAttribute(&info->ccMajor, CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MAJOR, dev);
+    cu.deviceGetAttribute(&info->ccMinor, CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MINOR, dev);
+    cu.deviceGetAttribute(&info->multiprocessors, CU_DEVICE_ATTRIBUTE_MULTIPROCESSOR_COUNT, dev);
+    cu.deviceGetAttribute(&info->clockHz, CU_DEVICE_ATTRIBUTE_CLOCK_RATE, dev);
+    return 1;
+}
+
+int cudausb_start(int port) {
+    if (serverRunning) return 0;
+    if (!loadDriver()) return -ENOENT;
+    int err = listenOn(port);
+    if (err) {
+        logf_("cannot listen on 127.0.0.1:%d: %s", port, strerror(-err));
+        return err;
+    }
+    memset(&stats, 0, sizeof stats);
+    STAT_SET(port, port);
+    STAT_SET(running, 1);
+    if ((err = pthread_create(&serverThread, NULL, serverMain, NULL))) {
+        close(listenFd);
+        listenFd = -1;
+        STAT_SET(running, 0);
+        return -err;
+    }
+    serverRunning = 1;
+    return 0;
+}
+
+void cudausb_stop(void) {
+    if (!serverRunning) return;
+    stopServer();
+    pthread_join(serverThread, NULL);
+    serverRunning = 0;
+}
+
+void cudausb_get_stats(ServerStats* out) {
+    uint64_t* dst = (uint64_t*) out;
+    uint64_t* src = (uint64_t*) &stats;
+    for (size_t i = 0; i < sizeof stats / sizeof(uint64_t); i++) {
+        dst[i] = __atomic_load_n(&src[i], __ATOMIC_RELAXED);
+    }
+}
+
+#endif
+
+#ifndef CUDAUSB_LIBRARY
 int main(int argc, char** argv) {
     int detach = argc > 1 && strcmp(argv[1], "-d") == 0;
     int port = argc > 1 + detach ? atoi(argv[1 + detach]) : CUDAUSB_DEFAULT_PORT;
@@ -373,31 +585,16 @@ int main(int argc, char** argv) {
         close(null);
     }
     if (!loadDriver()) return 1;  // after fork: libcuda starts threads when loaded
-
-    int srv = socket(AF_INET, SOCK_STREAM, 0);
-    int one = 1;
-    setsockopt(srv, SOL_SOCKET, SO_REUSEADDR, &one, sizeof one);
-    struct sockaddr_in addr = {0};
-    addr.sin_family = AF_INET;
-    addr.sin_port = htons(port);
-    addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-    if (bind(srv, (struct sockaddr*) &addr, sizeof addr) || listen(srv, 4)) {
-        perror("bind/listen");
+    int err = listenOn(port);
+    if (err) {
+        fprintf(stderr, "bind/listen 127.0.0.1:%d: %s\n", port, strerror(-err));
         return 1;
     }
-    logf_("cudausb-server listening on 127.0.0.1:%d", port);
     if (detach) {
         write(ready[1], "1", 1);
         close(ready[1]);
     }
-
-    for (;;) {
-        int fd = accept(srv, NULL, NULL);
-        if (fd < 0) continue;
-        setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof one);
-        logf_("client connected");
-        serveClient(fd);
-        close(fd);
-        logf_("client disconnected");
-    }
+    acceptLoop();
+    return 0;
 }
+#endif

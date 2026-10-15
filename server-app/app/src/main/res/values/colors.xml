@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Keep in sync with Palette.java -->
+    <color name="bg">#FF080B08</color>
+    <color name="panel">#FF0F1510</color>
+    <color name="panel_border">#FF1D2A1C</color>
+    <color name="green">#FF76B900</color>
+    <color name="green_bright">#FFA6F000</color>
+    <color name="green_dark">#FF2E4A00</color>
+    <color name="red">#FFFF4D4D</color>
+    <color name="text">#FFE3ECDB</color>
+    <color name="text_dim">#FF7D8B76</color>
+    <color name="ic_launcher_background">#FF0B120A</color>
+</resources>

@@ -14,6 +14,11 @@ android-app/.idea/
 android-app/local.properties
 android-app/**/build/
 android-app/app/.cxx/
+server-app/.gradle/
+server-app/.idea/
+server-app/local.properties
+server-app/**/build/
+server-app/app/.cxx/
 *.iml
 keystore.properties
 *.jks
