@@ -1,4 +1,4 @@
-# cuda-usb
+# shield-cuda — CUDA for NVIDIA SHIELD Tablet
 
 Use the GPU of an NVIDIA SHIELD Tablet (Tegra K1, Kepler sm_32, CUDA 7.5 driver) from a Linux PC
 over USB. Host programs written against the CUDA **Driver API** link to a `libcuda.so` shim that
@@ -25,7 +25,7 @@ After `git clone`, get `toolchain/` from the `cuda-usb-offline.tar.gz` release a
 the whole folder, ready to use offline):
 
 ```bash
-gh release download --repo Astrohaker/cuda-usb --pattern cuda-usb-offline.tar.gz
+gh release download --repo Astrohaker/shield-cuda --pattern cuda-usb-offline.tar.gz
 tar xzf cuda-usb-offline.tar.gz cuda-usb/toolchain --strip-components=1 -C .   # inside the clone
 ```
 
@@ -92,7 +92,7 @@ sets up `adb forward`. Temperatures other than the battery's are closed to apps 
 ## Usage
 
 ```bash
-cd cuda-usb
+cd shield-cuda               # the clone (cuda-usb/ if unpacked from the offline archive)
 scripts/connect.sh          # find the tablet, push + start the server, forward port 7777
 source scripts/env.sh       # LD_LIBRARY_PATH -> shim, PATH -> nvcc-k1 and examples
 devicequery
