@@ -1,0 +1,2 @@
+# NVIDIA (SHIELD Tablet) over USB: let the logged-in user use adb without root.
+SUBSYSTEM=="usb", ATTR{idVendor}=="0955", MODE="0660", TAG+="uaccess"

@@ -1,0 +1,10 @@
+#!/bin/sh
+# Compiles CUDA kernels for the tablet GPU: 32-bit sm_32 cubins (device code only).
+# Example: nvcc-k1 -cubin -o kernel.cubin kernel.cu
+ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+CUDA_HOME="${CUDA_HOME:-$ROOT/toolchain/cuda}"
+if [ ! -x "$CUDA_HOME/bin/nvcc-android" ]; then
+    echo "nvcc-k1: $CUDA_HOME/bin/nvcc-android not found (set CUDA_HOME)" >&2
+    exit 1
+fi
+exec "$CUDA_HOME/bin/nvcc-android" "$@"

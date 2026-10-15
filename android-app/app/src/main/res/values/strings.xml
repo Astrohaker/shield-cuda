@@ -1,0 +1,8 @@
+<resources>
+    <string name="app_name">NSTcuda</string>
+    <string name="count_label">Количество чисел</string>
+    <string name="count_default">4194304</string>
+    <string name="run">Вычислить √ на CUDA</string>
+    <string name="running">Считаю…</string>
+    <string name="bad_count">Введите число от 1 до 50000000</string>
+</resources>

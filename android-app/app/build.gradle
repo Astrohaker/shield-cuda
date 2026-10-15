@@ -1,0 +1,120 @@
+import javax.inject.Inject
+import org.gradle.process.ExecOperations
+
+plugins {
+    id 'com.android.application'
+}
+
+// Release signing credentials come from ~/.gradle/gradle.properties (NSTCUDA_*),
+// or from ORG_GRADLE_PROJECT_NSTCUDA_* environment variables on CI.
+// The nstcuda key lives in the shared astrohacker keystore, so the store falls back to DESCENT2_*.
+def releaseStoreFile = findProperty('NSTCUDA_STORE_FILE') ?: findProperty('DESCENT2_STORE_FILE')
+def releaseStorePassword = findProperty('NSTCUDA_STORE_PASSWORD') ?: findProperty('DESCENT2_STORE_PASSWORD')
+
+// CUDA 7.5 toolkit (the SHIELD Tablet driver's version) with nvcc-android for Tegra K1, sm_32:
+// the repository's toolchain/cuda (from the offline release archive), else ~/cuda-7.5.
+// Override with CUDA_HOME in gradle.properties.
+def repoCuda = rootProject.file('../toolchain/cuda')
+def cudaHome = findProperty('CUDA_HOME') ?:
+        (repoCuda.exists() ? repoCuda.absolutePath : "${System.getProperty('user.home')}/cuda-7.5")
+
+abstract class CompileCudaTask extends DefaultTask {
+    @InputDirectory
+    abstract DirectoryProperty getSourceDir()
+
+    @Input
+    abstract Property<String> getNvcc()
+
+    @OutputDirectory
+    abstract DirectoryProperty getOutputDir()
+
+    @Inject
+    abstract ExecOperations getExecOperations()
+
+    @TaskAction
+    void compile() {
+        def outDir = outputDir.get().asFile
+        outDir.deleteDir()
+        outDir.mkdirs()
+        sourceDir.get().asFile.eachFileMatch(~/.*\.cu/) { cu ->
+            def cubin = new File(outDir, cu.name.replaceAll(/\.cu$/, '.cubin'))
+            execOperations.exec {
+                commandLine nvcc.get(), '-cubin', '-o', cubin.absolutePath, cu.absolutePath
+            }
+        }
+    }
+}
+
+def compileCuda = tasks.register('compileCuda', CompileCudaTask) {
+    sourceDir = layout.projectDirectory.dir('src/main/cuda')
+    nvcc = "${cudaHome}/bin/nvcc-android".toString()
+}
+
+android {
+    namespace 'com.astrohacker.nstcuda'
+    compileSdk 36
+
+    defaultConfig {
+        applicationId 'com.astrohacker.nstcuda'
+        minSdk 23
+        targetSdk 36
+        versionCode 2
+        versionName '1.1'
+
+        // CUDA on Android exists only for 32-bit Tegra K1 (SHIELD Tablet).
+        ndk {
+            abiFilters 'armeabi-v7a'
+        }
+        externalNativeBuild {
+            cmake {
+                arguments "-DCUDA_HOME=${cudaHome}"
+            }
+        }
+    }
+
+    ndkVersion '21.4.7075529'
+
+    externalNativeBuild {
+        cmake {
+            path 'src/main/cpp/CMakeLists.txt'
+            version '3.18.1'
+        }
+    }
+
+    signingConfigs {
+        release {
+            if (releaseStoreFile) {
+                storeFile file(releaseStoreFile)
+                storePassword releaseStorePassword
+                keyAlias findProperty('NSTCUDA_KEY_ALIAS')
+                keyPassword findProperty('NSTCUDA_KEY_PASSWORD')
+            }
+        }
+    }
+
+    buildTypes {
+        release {
+            minifyEnabled true
+            shrinkResources true
+            proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
+            if (releaseStoreFile) {
+                signingConfig signingConfigs.release
+            }
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+}
+
+androidComponents {
+    onVariants(selector().all()) { variant ->
+        variant.sources.assets.addGeneratedSourceDirectory(compileCuda) { it.outputDir }
+    }
+}
+
+dependencies {
+    implementation 'androidx.appcompat:appcompat:1.8.0'
+}
